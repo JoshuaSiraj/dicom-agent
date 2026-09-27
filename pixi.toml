@@ -1,0 +1,17 @@
+[workspace]
+authors = ["Joshua Siraj <joshua.siraj@ryerson.ca>"]
+channels = ["conda-forge"]
+name = "dicom-agent"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+adk-web = "adk web"
+adk-run = "adk run dicom_agent"
+
+[dependencies]
+python = ">=3.12,<3.13"
+
+[pypi-dependencies]
+google-adk = ">=1.0"
+med-datactrl = { path = "../med-datactrl", editable = true }

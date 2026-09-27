@@ -1,0 +1,39 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.installed.cfg
+*.egg
+build/
+dist/
+.venv/
+venv/
+
+# tests and type checks
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# adk local sessions
+.adk/
+
+# editor and os
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
