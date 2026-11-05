@@ -1,1 +1,1 @@
-from . import agent
+"""DICOM agent for MedDataOS."""

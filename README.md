@@ -1,36 +1,58 @@
 # dicom-agent
 
-A Google ADK agent that studies one local DICOM case by navigating the [med-datactrl](../med-datactrl) harness.
+A DICOM specialist served as an OpenAI chat completions endpoint (used with [MedDataOS](../MedDataOS), but not hard-wired to it).
 
-The model decides which series to inspect. The harness decides how a series is opened and how much comes back. The agent does not crawl folders itself.
+The host holds the case and runs remote tools. This process decides which series to inspect from the tool list and system message on each request. It does not open the case folder itself. Domain knowledge is static; volume / sandbox guidance is derived from the advertised tools.
 
 ## Shape
 
-One `LlmAgent` (`dicom_agent/agent.py`). Its tools are built only from `TOOL_DEFINITIONS` in `med-datactrl/src/datactrl/tools.py`. Each ADK tool copies that definition's name, description, and parameters, and runs `datactrl.tools.dispatch`.
+`dicom_agent/agent.py` is a Google ADK agent. `dicom_agent/serve.py` accepts `POST /v1/chat/completions` and runs one turn of that agent. The host runs any remote tool calls in the response and sends the results back on the next request. `prompt.build_instruction(tools, host_system)` merges DICOM domain text with a capabilities addendum from the request's `tools` list plus the host's system messages (citation schema, case resources, etc.).
 
 | Tool | Role |
 | --- | --- |
-| `discover` | Open a case folder and list series. Call this first. |
 | `describe` | Modality, label, path, links, and fetch views. No pixels. |
-| `fetch` | One bounded view. `preview` plus `slice_index` for an image series. `metadata` for an RTSTRUCT. |
+| `fetch` | One bounded view. `preview` plus `slice_index` for an image series. `metadata` for an RTSTRUCT. `volume` for a NIfTI of the series. |
 | `dicom_groups` | Pair series. `query="CT,RTSTRUCT"` links a CT to its structure set. |
 | `dicom_tree` | Reference forest of roots and children. |
 | `links` | Structural links for one series or the whole case. |
 | `assert_link` | Record a relationship the files did not already state. Session only. |
+| `list_nifti_inputs` | Local. List NIfTI files staged into this process's sandbox. |
+| `run_python` | Local. Run short Python (SimpleITK, numpy) against those files. |
 
-Resource ids look like `dicom:<SeriesInstanceUID>`. Later calls take `root` or the `case_id` returned by `discover`. `med-datactrl` keeps one `Case` per root.
+## NIfTI sandbox
+
+MedDataOS runs `fetch`; this agent analyzes the bytes.
+
+1. Agent returns `fetch` with `view=volume` (optional `spacing`).
+2. MedDataOS replies with `{"status":"ok","name":"fetch","result":{…volume_base64…},"cite":"…"}`.
+3. On the next `/v1/chat/completions` request, this process writes the NIfTI under a temporary `inputs/`, keeps `cite`, and replaces `volume_base64` with `sandbox_path` before Gemini sees the turn.
+4. Agent calls local `run_python` (SimpleITK subprocess: timeout, cleared env — not a container). Those tool names are stripped from the OpenAI response so MedDataOS never dispatches them.
+5. Workspace is deleted when the turn ends; later turns re-stage from chat history.
+
+```bash
+# terminal 1
+cd dicom-agent && pixi run serve          # http://127.0.0.1:8002/v1
+
+# terminal 2
+cd MedDataOS && pixi run serve /path/to/case --agent-url http://127.0.0.1:8002/v1
+```
+
+Raise `AGENT_TIMEOUT` in MedDataOS if large volumes need more than 120s.
+
+Resource ids look like `dicom:<SeriesInstanceUID>`. They arrive on the question as `case.resources`. The server fills the case folder, so calls do not pass `root` or `case_id`.
 
 ## How a turn goes
 
-1. `discover` the folder the user gave.
+1. MedDataOS posts the question, the chat so far, the series list, and the tools.
 2. `describe` a series before fetching it.
-3. `fetch` a preview to look at an image, or metadata to read an RTSTRUCT.
-4. `dicom_groups` to pair an image series with its RTSTRUCT.
-5. Report the series ids and what the tools returned.
+3. `fetch` a preview to look at an image, metadata for an RTSTRUCT, or `volume` for a NIfTI of a CT/MR/PT/dose/mask series.
+4. After `fetch(view=volume)`, this process stages the NIfTI and the agent may call `list_nifti_inputs` / `run_python` (local). Those names are never returned as MedDataOS `tool_calls`.
+5. `dicom_groups` to pair an image series with its RTSTRUCT.
+6. Reply to the server. After `describe` or `fetch`, the reply is the citation JSON the server asked for. For a sandbox measurement, use `kind: "derived"` with a plain-language `method`, optional `result`, and the `cite` token from the volume fetch. Otherwise it is plain text.
 
 ## Later: PyRadiomics and predictive models
 
-Not on the agent yet. Two tools would join the same way as the others: an entry in `TOOL_DEFINITIONS` and a handler behind `dispatch`.
+Not on the agent yet. Two tools would join med-datactrl as an entry in `TOOL_DEFINITIONS` and a handler behind `dispatch`. This agent would see them in the tool list the server sends.
 
 - `radiomics` takes a linked image series, RTSTRUCT, and ROI name, and returns a small feature dict. The volume and mask stay inside the handler.
 - `predict` scores a saved model on that dict.
@@ -113,12 +135,31 @@ Those four features were defined in Matlab in 2014. PyRadiomics renamed Compactn
 
 ## Run
 
-Python 3.12. `med-datactrl` does not support 3.14.
+Python 3.12. The agent uses [LiteLLM](https://docs.litellm.ai/) via ADK. Set the model in `.env`:
+
+```bash
+# .env — LiteLLM model id (provider/name). Bare Azure deployment names also work
+# when AZURE_OPENAI_* is set (resolved to azure_ai/… or azure/…).
+DICOM_AGENT_MODEL=gemini/gemini-flash-latest
+GOOGLE_API_KEY=...
+
+# Azure AI Foundry / Azure OpenAI example:
+# DICOM_AGENT_MODEL=gpt-5.4-mini
+# AZURE_OPENAI_API_KEY=...
+# AZURE_OPENAI_ENDPOINT=https://<resource>.services.ai.azure.com
+# AZURE_OPENAI_DEPLOYMENT=gpt-5.4-mini
+# AZURE_OPENAI_API_VERSION=2024-10-21
+```
 
 ```bash
 pixi install
-# dicom_agent/.env
-# GOOGLE_API_KEY=...
-pixi run adk-web    # from this directory; open the dicom_agent app
-pixi run adk-run
+pixi run serve
 ```
+
+`pixi run serve` answers MedDataOS at `http://127.0.0.1:8002/v1`. Start it, then start MedDataOS with that address.
+
+```bash
+pixi run serve /path/to/folder --agent-url http://127.0.0.1:8002/v1
+```
+
+Pass `--port` to listen somewhere else, and use that port in `--agent-url`.
